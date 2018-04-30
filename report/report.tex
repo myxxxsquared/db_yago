@@ -1,0 +1,175 @@
+% !TEX program = xelatex
+
+\documentclass[12pt]{ctexart}
+
+    \usepackage[colorlinks,linkcolor=red]{hyperref}
+    \usepackage{array}
+    \usepackage{makecell}
+    
+    \title{NoSQL数据库存取yago数据\\{\Large 大数据管理技术第二次实习作业}}
+    \author{张文杰 1500011394}
+
+    
+\begin{document}
+
+\maketitle
+
+\section{介绍}
+本次上机作业使用Redis、Mongodb、Cassandra三种数据库，利用上一次实验装好的数据库和数据库驱动程序，在我自己的电脑上，完成了对于yago数据的储存和查询操作。使用的操作系统为Ubuntu 18.04，8G内存，编程语言为Python 3.5。报告中仅展示了部分源代码，详细源代码见Github~\url{https://github.com/myxxxsquared/db_yago}。
+
+\section{实验内容}
+
+实验的内容分为两部分，第一部分为将数据导入到相应的数据库中，第二部分为完成相应的查询，这里规定了四个查询操作。
+\begin{enumerate}
+    \itemsep0em
+    \item[Exp01] 查询S为`Mel\_Thompson'的所有的P和O。
+    \item[Exp02] 查询O为`England'的所有的S和P。
+    \item[Exp03] 查询含有`graduatedFrom'和`isLeaderOf'的S。
+    \item[Exp04] 查询含有`England'最多的S。
+\end{enumerate}
+
+\subsection{Redis}
+
+\subsubsection{储存模式}
+
+Redis数据库不能建立除KEY之外的额外索引信息，为了完成指定的查询任务，需要对于S，O，V都有查询，因此需要在Redis数据库中使用冗余的数据，才能完成指定的操作。在这里，我使用了如下的数据存储模式。
+\begin{enumerate}
+    \itemsep0em
+    \item 建立一个名为`~~'(空格)的SET，用于保存所有的S的列表。
+    \item 建立名为`S名称~~P名称'(S名称+空格+P名称)的SET，用于保存S在P下的所有O。
+    \item 建立名为`O名称'的SET，用于保存所有含有O的S和P。
+\end{enumerate}
+以如下的数据为例
+\begin{verbatim}
+Richard_Stallman isLeaderOf Free_Software_Foundation
+Richard_Stallman isLeaderOf Cambridge_Bay
+Andranik isLeaderOf Armenian_fedayi
+\end{verbatim}
+其储存在Redis数据库中格式为
+\begin{verbatim}
+' ':
+    ['Richard_Stallman', 'Andranik']
+'Richard_Stallman isLeaderOf': 
+    ['Free_Software_Foundation', 'Cambridge_Bay']
+'Andranik isLeaderOf':
+    ['Armenian_fedayi']
+'Free_Software_Foundation':
+    ['Richard_Stallman isLeaderOf']
+'Cambridge_Bay':
+    ['Richard_Stallman isLeaderOf']
+'Armenian_fedayi':
+    ['Andranik']
+\end{verbatim}
+
+\subsubsection{查询方法}
+
+对于Redis的查询只能使用KEY来进行，通过si查找P和O，只需要找到所有的形式为`si~~*'的KEY，即使用命令`KEY ``si~~*'''，然后使用SMEMBERS命令查询KEY的值即可。
+
+通过oi来查找S和P，只需使用数据库中已有的数据，利用SMEMBERS命令直接查询即可。
+
+通过p1、p2查找所有同时拥有p1、p2的S，可以通过查询所有拥有p1的S和所有拥有p2的S，再求交集即可。查询拥有p1的S可以通过命令`KEY ``*~~p1'''来完成，同理可以查询到所有拥有p2的S，之后通过intersection求交集，可以得到同时拥有两者的S。
+
+通过oi查询拥有这样oi最多的S，可以直接使用SMEMBERS命令查询到所有拥有这样oi的si和pi，经过计数即可找到最多的一项。
+
+\subsubsection{遇到的问题}
+
+我测试使用的电脑内存只有8G，由于储存的数据量较大，而Redis的所有数据均储存在内存中，占用大量的内存。
+
+Redis的数据储存到硬盘的过程直接使用了fork系统调用，在占用大量内存时就会导致内存的overcommit，fork操作失败，失败提示为
+\begin{verbatim}
+Can't save in background: fork: Cannot allocate memory
+\end{verbatim}
+
+这里采用的解决方法是，始终允许系统内核overcommit内存，即写入一个`1'到`/proc/sys/vm/overcommit\_memory'文件内，这样fork系统调用就不会失败。
+
+\subsection{MongoBD}
+
+\subsubsection{储存模式}
+
+在MongoDB中，为了实现以上四种查询，在这里我使用了一种简单类似二维表的存储模式，对于每一条记录，将其储存为一个文档，例如
+\begin{verbatim}
+Richard_Stallman isLeaderOf Free_Software_Foundation
+\end{verbatim}
+被储存为
+\begin{verbatim}
+{
+    s: `Richard_Stallman',
+    v: `isLeaderOf',
+    o: `Free_Software_Foundation'
+}
+\end{verbatim}
+在MongoDB中可以使用索引来加速查询过程，在本次实验中，分别测试了没有索引和有索引的查询效率。
+
+\subsubsection{查询方法}
+
+已知si或oi查询PO和SP，只需使用MongoDB的查询文档
+\begin{verbatim}{ s: `si' }\end{verbatim}
+或
+\begin{verbatim}{ o: `oi' }\end{verbatim}
+即可完成查询
+
+通过p1、p2查找所有同时拥有p1、p2的S，类似Redis，可以直接查询出所有含有p1的S和所有p2的S，再取交集。通过oi查询拥有这样oi最多的S，可以通过找出所有的再进行计数。
+
+\subsection{Cassandra}
+
+\subsubsection{储存模式}
+
+这里采用的也是类似二维表的储存方法，建立一个表。由于Cassandra必须有一个无重复的主键，因此多引入一项用于存储编号作为主键。
+\begin{verbatim}
+create table if not exists yago (
+    i int primary key,
+    s varchar,
+    v varchar,
+    o varchar
+);
+\end{verbatim}
+由于Cassandra的应用场景的要求，Cassandra对数据的查询有很多timeout的情形，因此如果不对于数据库建立索引，会导致查询操作超时报错，因此为了满足以上的查询需求，本次实验中仅进行了建立索引后的查询实验，建立索引的操作为
+\begin{verbatim}
+create index if not exists sindex on yago (s);
+create index if not exists vindex on yago (v);
+create index if not exists oindex on yago (o);
+\end{verbatim}
+
+\subsubsection{查询方法}
+
+由于数据存储模式与Cassandra基本相同，查询方法也基本相同，只不过是把查询文档改为CQL语句。
+\begin{verbatim}
+select s, v, o from yago where s = %s;
+select s, v, o from yago where v = %s;
+select s, v, o from yago where o = %s;
+\end{verbatim}
+
+\section{实验结果和分析}
+
+四种操作分别在三个不同的数据库上进行操作，得到的操作时间如表\ref{tab}所示。
+
+比较MongoDB的有无索引，有索引的查询速度总是大大快于无索引的查询速度。
+
+Exp02和Exp04中涉及了大量的数据查询，这是由于以`England'为O的记录很多，在这样的实验中，Redis表现出较高的效率，说明Redis适用于大量简单的查询操作。在这两个测试上，MongoDB的效率略低于Redis，但是也远远高于Cassandra。
+
+在Exp01和Exp03，MongoDB的速度快于Redis，这里Redis需要进行KEY查询，一定程度上影响了速度，使得MongoDB速度相对较快。
+
+Cassandra数据库的表现除了数据量较小的Exp01外，表现普遍较差，可能是由于Cassandra数据库的设计中有冗余储存等技术，Cassandra查询数据速度慢与另外两个数据库。
+
+\begin{table}
+    \centering
+    \caption{查询操作时间（单位 秒）\label{tab}}
+	\begin{tabular}{|c|p{2.5cm}<{\centering}|p{2.5cm}<{\centering}|p{2.5cm}<{\centering}|p{2.5cm}<{\centering}|}
+		\hline
+		      & Redis & \makecell{MongoDB\\(有索引)} & \makecell{MongoDB\\(无索引)} & Cassandra \\
+		\hline
+		Exp01 & 1.351 & \textbf{0.022} & 10.41 & 0.040 \\
+		Exp02 & \textbf{0.779} & 1.210 & 5.799 & 30.79 \\
+		Exp03 & 8.378 & \textbf{0.982} & 10.25 & 14.63 \\
+		Exp04 & \textbf{1.024} & 1.046 & 6.110 & 24.28 \\
+		\hline
+	\end{tabular}
+\end{table}
+
+\section{个人体会}
+
+在本次的上机实验中，三个数据库各有各的特点。Redis全部使用内存存储，占用大量内存空间。MongoDB支持一定的数据结构，使得操作和查询变得更加容易。Cassandra更适用于分布式存储，对于本实验中单一结点的存储体验较差。
+
+个人感觉而言，还是更喜欢MongoDB，因为MongoDB操作简单，支持比较灵活的数据结构操作和查询，并且不容易发生问题。
+
+\end{document}
